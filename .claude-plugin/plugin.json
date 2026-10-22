@@ -1,0 +1,22 @@
+{
+  "name": "relay-preflight",
+  "version": "1.2.0",
+  "description": "Offline hygiene check for relay/aggregator API configs: flags inline sk- keys, literal Bearer tokens, plaintext http base_url, and missing endpoints. Masks secrets, strips URLs, no network, no env-value reads.",
+  "author": {
+    "name": "Daizhi Liao (dafahaha)"
+  },
+  "license": "MIT",
+  "keywords": [
+    "api-key",
+    "security",
+    "relay",
+    "mcp",
+    "config-hygiene",
+    "secret-scanning"
+  ],
+  "homepage": "https://github.com/dafahaha/relay-preflight",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dafahaha/relay-preflight.git"
+  }
+}

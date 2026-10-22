@@ -1,0 +1,13 @@
+{
+  "name": "dafahaha-skills",
+  "owner": {
+    "name": "Daizhi Liao (dafahaha)"
+  },
+  "plugins": [
+    {
+      "name": "relay-preflight",
+      "source": "./",
+      "description": "Offline config hygiene for relay/aggregator keys: inline secret, Bearer literal, plaintext URL, missing endpoint; masks secrets, no network."
+    }
+  ]
+}
