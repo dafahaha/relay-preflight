@@ -27,6 +27,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import re
 import sys
@@ -63,21 +64,40 @@ ENV_REF_RE = re.compile(
 KEY_WORDS = {
     "key", "token", "secret", "auth", "password", "credential", "credentials",
 }
-# A field name that marks an http URL as an actual endpoint (vs a doc link).
-# Anchored at a boundary so database_url/nameserver_url do not match.
+# A field name that marks an http URL as an actual endpoint. Used on JSON key
+# paths (clean) and, for text, only in an explicit assignment form (see
+# TEXT_ENDPOINT_ASSIGN_RE) so prose "configure the endpoint at http://..." does
+# not upgrade a documentation link.
 ENDPOINT_FIELD_RE = re.compile(
     r"(?:^|[\s\"'\-.,:}])(?:base[_-]?url|api[_-]?url|server[_-]?url|endpoint)\b",
     re.IGNORECASE,
 )
+# Text configs: an endpoint field assigned a URL on the same line.
+TEXT_ENDPOINT_ASSIGN_RE = re.compile(
+    r"(?:base[_-]?url|api[_-]?url|server[_-]?url|endpoint)\s*[:=]\s*[\"']?https?://",
+    re.IGNORECASE,
+)
+# Text configs: a key-named assignment left-value, e.g. RELAY_API_KEY=xyz.
+ASSIGN_LEFT_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*[:=]")
+# A trailing key word even when concatenated without a separator (apikey).
+_CONCAT_KEY_RE = re.compile(r"(key|secret|token|password|credential|credentials)$")
 
 
 def _var_words(name: str) -> list[str]:
-    """Split a variable/field name into lowercase words on '_', '-', and
-    camelCase boundaries (e.g. 'apiKey' -> ['api','key'])."""
+    """Split a variable/field name into lowercase words on '_', '-', camelCase
+    boundaries, and a trailing concatenated key word (e.g. 'apikey' ->
+    ['api','key'])."""
     words: list[str] = []
     for part in re.split(r"[_\-]+", name):
-        words.extend(re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part))
-    return [w.lower() for w in words if w]
+        for w in re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part):
+            wl = w.lower()
+            m = _CONCAT_KEY_RE.search(wl)
+            if m and m.start() > 0:
+                words.append(wl[:m.start()])
+                words.append(m.group(0))
+            else:
+                words.append(wl)
+    return [w for w in words if w]
 
 
 def _is_key_name(name: str) -> bool:
@@ -98,6 +118,18 @@ def _key_env_ref(text: str) -> bool:
     return False
 
 
+def _key_assignment_ref(text: str) -> bool:
+    """True when a text line assigns to a key-named left-value
+    (e.g. RELAY_API_KEY=xyz)."""
+    m = ASSIGN_LEFT_RE.match(text)
+    return bool(m and _is_key_name(m.group(1)))
+
+
+def _has_key_context(text: str) -> bool:
+    """True when text references a key by env var or by assignment left-value."""
+    return _key_env_ref(text) or _key_assignment_ref(text)
+
+
 def _has_bearer_literal(text: str) -> bool:
     """True when the text carries a real Bearer credential (prose such as
     "Bearer token/docs" is filtered, the same way the finding paths do)."""
@@ -108,10 +140,11 @@ def _has_bearer_literal(text: str) -> bool:
 
 
 def _has_secret_context(text: str) -> bool:
-    """True when the same string carries a literal secret, Bearer, or key env ref."""
+    """True when the same string carries a literal secret, Bearer, or key
+    reference (env var or assignment left-value)."""
     return bool(
         SK_RE.search(text) or PK_RE.search(text) or JWT_RE.search(text)
-        or _has_bearer_literal(text) or _key_env_ref(text)
+        or _has_bearer_literal(text) or _has_key_context(text)
     )
 
 # Plaintext http on the loopback interface never leaves the machine; it is a
@@ -133,9 +166,9 @@ class Finding:
 
 
 def mask_token(tok: str) -> str:
-    """Mask any sk-... token: keep prefix + last 2 chars, middle stars."""
+    """Mask a secret token: keep its real prefix + last 2 chars, middle stars."""
     if len(tok) <= 6:
-        return "sk-***"
+        return tok[:3] + "***"
     return tok[:4] + "***" + tok[-2:]
 
 
@@ -168,30 +201,17 @@ def _host_of(url: str) -> str:
         return ""
 
 
-def _is_valid_ipv4_octets(text: str) -> bool:
-    """True when text is a dotted-quad with every octet in 0..255."""
-    parts = text.split(".")
-    if len(parts) != 4:
-        return False
-    for p in parts:
-        if not p.isdigit() or not (0 <= int(p) <= 255):
-            return False
-    return True
-
-
 def _is_loopback_host(host: str) -> bool:
-    """Loopback by the whole 127.0.0.0/8 range (not just .1), localhost, IPv6
-    ::1, and an IPv4-mapped loopback (::ffff:127.x). A name such as
-    '127.evil.com' or an invalid '127.999.1.1' is NOT treated as loopback."""
+    """Loopback for IP literals via the standard library (`ipaddress` covers
+    127.0.0.0/8, ::1, IPv4-mapped forms, and hex/long IPv6), plus the
+    localhost names. A name such as '127.evil.com' is NOT loopback."""
     h = host
     if h in LOOPBACK_HOSTS or h == "localhost":
         return True
-    if h.startswith("127.") and _is_valid_ipv4_octets(h):
-        return True
-    m = re.match(r"^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$", h)
-    if m and _is_valid_ipv4_octets(m.group(1)):
-        return m.group(1).startswith("127.")
-    return False
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -199,7 +219,14 @@ def _is_loopback_url(url: str) -> bool:
 
 
 def _is_bind_all_url(url: str) -> bool:
-    return _host_of(url) in BIND_ALL_HOSTS
+    """Bind-all (unspecified) addresses: 0.0.0.0 and :: via ipaddress."""
+    h = _host_of(url)
+    if h in BIND_ALL_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(h).is_unspecified
+    except ValueError:
+        return False
 
 
 def _is_bearer_prose(token: str) -> bool:
@@ -263,8 +290,10 @@ def _http_findings(line: str, file_label: str, lineno: int) -> tuple[list[Findin
                 "is reachable off-machine — prefer https:// or bind 127.0.0.1 for local-only",
                 red,
             ))
-        elif ENDPOINT_FIELD_RE.search(line) or _has_secret_context(line):
-            # Endpoint context: field name or a key/env ref on the same line.
+        elif TEXT_ENDPOINT_ASSIGN_RE.search(line) or _has_secret_context(line):
+            # Endpoint context: an explicit endpoint assignment or a key/env
+            # reference on the same line. Prose "configure the endpoint" alone
+            # does not qualify (that falls through to the non-endpoint WARN).
             out.append(Finding(
                 file_label, lineno, "FAIL", "plaintext-url",
                 "http:// public base_url sends the relay key over plaintext; use https://",
@@ -300,7 +329,7 @@ def _scan_text_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
         findings, saw_url = _http_findings(line, file_label, lineno)
         out.extend(findings)
         flags["url"] |= saw_url
-        if _key_env_ref(line):
+        if _has_key_context(line):
             flags["env_ref"] = True
 
     if flags["env_ref"] and not flags["url"]:
@@ -315,6 +344,13 @@ def _scan_text_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
 def scan_text(text: str, file_label: str) -> list[Finding]:
     out, _ = _scan_text_impl(text, file_label)
     return out
+
+
+def _last_key(path_: str) -> str:
+    """Last key segment of a dotted JSON path, array index stripped:
+    'servers[0].baseUrl' -> 'baseUrl'."""
+    tail = path_.split(".")[-1] if path_ else ""
+    return re.sub(r"\[\d+\]$", "", tail)
 
 
 def _walk_json_strings(node, path: str, sink: list[tuple[str, str]]) -> None:
@@ -341,6 +377,11 @@ def _scan_json_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
     out: list[Finding] = []
     flags = {"env_ref": False, "url": False}
     for path_, value in sink:
+        # The JSON key for this value (last path segment, array index stripped)
+        # is itself evidence when it is a key/endpoint name.
+        key_name = _last_key(path_)
+        if _is_key_name(key_name):
+            flags["env_ref"] = True
         out.extend(_secret_findings(value, file_label, 0, f"at JSON path {path_}"))
         out.extend(_userinfo_findings(value, file_label, 0))
         for m in BEARER_RE.finditer(value):
@@ -368,7 +409,8 @@ def _scan_json_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
                         "(not loopback); reachable off-machine — prefer https or bind 127.0.0.1",
                         redact_url(url),
                     ))
-                elif ENDPOINT_FIELD_RE.search(path_) or _has_secret_context(value):
+                elif ENDPOINT_FIELD_RE.search(key_name) or _is_key_name(key_name) \
+                        or _has_secret_context(value):
                     out.append(Finding(
                         file_label, 0, "FAIL", "plaintext-url",
                         f"http:// public endpoint at JSON path {path_}; use https://",

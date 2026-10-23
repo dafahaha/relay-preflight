@@ -1,5 +1,23 @@
 # Changelog — relay-preflight
 
+v1.6.0 — 2026-10-23
+
+## Round-8 independent clean review (fresh reviewer, cold reading)
+- P1-1 (fixed): key-name evidence now covers assignment left-values in text
+  (e.g. `RELAY_API_KEY=xyz`) and JSON key names (the last path segment), not
+  only `$` env references — so a key-named config with no URL still triggers
+  `no-base-url`, and a key-named endpoint context is recognized.
+- P2-1 (fixed): all-lowercase concatenated key names (apikey/secretkey/
+  privatekey/accesskey) are split and recognized; "authority" is still not
+  misread as "auth".
+- P2-2 (fixed): prose "configure the endpoint" no longer upgrades a
+  documentation link to FAIL; only an explicit endpoint assignment does.
+- P2-3 (fixed): IP classification now uses the standard library `ipaddress`
+  (covers IPv6 loopback ::1 and unspecified ::, mapped forms), replacing the
+  hand-written checks.
+- P2-4 (fixed): a short pk- token is masked with its real prefix, not "sk-".
+- Suite: 55 tests (7 added).
+
 v1.5.0 — 2026-10-23
 
 ## Round-7 independent clean review (fresh reviewer, cold reading)

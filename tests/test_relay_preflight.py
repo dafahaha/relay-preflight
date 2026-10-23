@@ -334,3 +334,54 @@ def test_redact_url_malformed_port_keeps_host():
 def test_key_env_default_expansion_recognized():
     # ${VAR:-default} must still be recognized from its name.
     assert rp._key_env_ref("${SECRET:-changeme}") is True
+
+
+# ---- R8 review fixes ----
+
+def test_env_key_assignment_triggers_no_base_url(tmp_path: Path):
+    # P1-1: a key-named assignment with no URL must WARN no-base-url.
+    p = tmp_path / ".env"
+    p.write_text("RELAY_API_KEY=opaquetoken123\n", encoding="utf-8")
+    fs = rp.scan_file(p)
+    assert any(f.rule == "no-base-url" and f.severity == "WARN" for f in fs)
+
+
+def test_json_key_name_triggers_no_base_url(tmp_path: Path):
+    # P1-1: a JSON key named like a key, no URL -> no-base-url.
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps({"relayApiKey": "opaquetoken123"}), encoding="utf-8")
+    fs = rp.scan_file(p)
+    assert any(f.rule == "no-base-url" for f in fs)
+
+
+def test_concatenated_lowercase_key_name():
+    # P2-1: apikey/secretkey/privatekey/accesskey are key names.
+    assert rp._is_key_name("apikey")
+    assert rp._is_key_name("secretkey")
+    assert rp._is_key_name("privatekey")
+    assert rp._is_key_name("accesskey")
+    # authority must not be misread as auth.
+    assert rp._is_key_name("authority") is False
+
+
+def test_prose_endpoint_does_not_upgrade_link():
+    # P2-2: prose "configure the endpoint at http://..." stays WARN, not FAIL.
+    fs = rp.scan_text("configure the endpoint at http://example.com/guide", "cfg")
+    assert not any(f.rule == "plaintext-url" and f.severity == "FAIL" for f in fs)
+
+
+def test_assigned_endpoint_http_fails():
+    # An explicit endpoint=http://... must still FAIL.
+    fs = rp.scan_text("base_url=http://example.com/api", "cfg")
+    assert any(f.rule == "plaintext-url" and f.severity == "FAIL" for f in fs)
+
+
+def test_ipv6_loopback_and_unspecified():
+    # P2-3: ipaddress recognizes ::1 loopback and :: unspecified.
+    assert rp._is_loopback_url("http://[0:0:0:0:0:0:0:1]/x") is True
+    assert rp._is_bind_all_url("http://[::]/x") is True
+
+
+def test_mask_token_keeps_real_prefix():
+    # P2-4: a pk- token must not be masked with an sk- prefix.
+    assert rp.mask_token("pk-live-abcdefgh").startswith("pk-")
