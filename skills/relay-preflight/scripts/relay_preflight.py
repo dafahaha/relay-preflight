@@ -45,25 +45,47 @@ JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+")
 # filtered explicitly (see _BEARER_PROSE_WORDS).
 BEARER_RE = re.compile(r"(?i)bearer\s+[\"']?([A-Za-z0-9_\-\.]{8,})")
 _BEARER_PROSE_WORDS = {
-    "authentication", "authorization", "token", "scheme", "header", "credentials",
-    "credential", "required", "flow", "example",
+    "authentication", "authorization", "token", "scheme", "header", "headers",
+    "credentials", "credential", "required", "flow", "example",
 }
 URL_RE = re.compile(r"https?://[^\s\"'\\,)]+")
+# Credentials embedded inline in a URL's userinfo: scheme://user:pass@host.
+URL_USERINFO_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s@]+:[^/\s@]+@")
 # Env-var references: ${VAR} (paired braces) or $VAR (word boundary).
 ENV_REF_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*\b")
-# Only an env reference whose name looks like a key counts for the no-base-url /
-# secret-context logic, so $HOME/$PATH in a shell snippet does not trip it.
-KEY_NAME_RE = re.compile(r"(KEY|TOKEN|SECRET|AUTH|PASS|CRED)", re.IGNORECASE)
+# Exact key words (matched per variable-name word, not as a substring), so
+# AUTHORITY/COMPASS/CREDIT are not misread as key names.
+KEY_WORDS = {
+    "key", "token", "secret", "auth", "password", "credential", "credentials",
+}
 # A field name that marks an http URL as an actual endpoint (vs a doc link).
-# Anchored names only; a bare `url`/`homepage_url` substring must not match.
-ENDPOINT_FIELD_RE = re.compile(r"(base_?url|api_?url|server_?url|endpoint)", re.IGNORECASE)
+# Anchored at a boundary so database_url/nameserver_url do not match.
+ENDPOINT_FIELD_RE = re.compile(
+    r"(?:^|[\s\"'\-.,:}])(?:base[_-]?url|api[_-]?url|server[_-]?url|endpoint)\b",
+    re.IGNORECASE,
+)
+
+
+def _var_words(name: str) -> list[str]:
+    """Split a variable/field name into lowercase words on '_', '-', and
+    camelCase boundaries (e.g. 'apiKey' -> ['api','key'])."""
+    words: list[str] = []
+    for part in re.split(r"[_\-]+", name):
+        words.extend(re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part))
+    return [w.lower() for w in words if w]
+
+
+def _is_key_name(name: str) -> bool:
+    """True when a variable name contains an exact key word (not a substring)."""
+    return any(w in KEY_WORDS for w in _var_words(name))
 
 
 def _key_env_ref(text: str) -> bool:
     """True when text carries an env reference whose name resembles a key."""
     for m in ENV_REF_RE.finditer(text):
-        name = m.group(0)
-        if KEY_NAME_RE.search(name):
+        # Strip the leading $ and any braces to inspect the variable name.
+        name = m.group(0).lstrip("$").strip("{}")
+        if _is_key_name(name):
             return True
     return False
 
@@ -117,17 +139,38 @@ def redact_url(url: str) -> str:
 
 def _host_of(url: str) -> str:
     try:
-        return (urlparse(url).hostname or "").strip("[]").lower()
+        # strip a trailing dot and any IPv6 brackets; lowercase.
+        return (urlparse(url).hostname or "").strip("[]").rstrip(".").lower()
     except ValueError:
         return ""
 
 
+def _is_loopback_host(host: str) -> bool:
+    """Loopback by the whole 127.0.0.0/8 range (not just .1), localhost, IPv6
+    ::1, and an IPv4-mapped loopback (::ffff:127.x)."""
+    h = host
+    if h in LOOPBACK_HOSTS or h == "localhost":
+        return True
+    if h.startswith("127."):
+        return True
+    m = re.match(r"^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$", h)
+    if m:
+        return m.group(1).startswith("127.")
+    return False
+
+
 def _is_loopback_url(url: str) -> bool:
-    return _host_of(url) in LOOPBACK_HOSTS
+    return _is_loopback_host(_host_of(url))
 
 
 def _is_bind_all_url(url: str) -> bool:
     return _host_of(url) in BIND_ALL_HOSTS
+
+
+def _is_bearer_prose(token: str) -> bool:
+    """True when a Bearer 'token' is really prose (e.g. 'example.com',
+    'authentication'): split on punctuation and match any segment."""
+    return any(seg in _BEARER_PROSE_WORDS for seg in re.split(r"[._\-]+", token.lower()))
 
 
 def _secret_findings(value: str, file_label: str, line: int, where: str) -> list[Finding]:
@@ -145,6 +188,18 @@ def _secret_findings(value: str, file_label: str, line: int, where: str) -> list
         out.append(Finding(file_label, line, "FAIL", "inline-secret",
                            f"literal JWT {where}; use an environment-variable reference",
                            "eyJ***"))
+    return out
+
+
+def _userinfo_findings(value: str, file_label: str, line: int) -> list[Finding]:
+    """Credentials embedded inline in a URL userinfo (scheme://user:pass@host)."""
+    out: list[Finding] = []
+    for m in URL_USERINFO_RE.finditer(value):
+        out.append(Finding(
+            file_label, line, "FAIL", "url-userinfo-credential",
+            "credentials embedded inline in a URL's userinfo; pass them via env, not in the URL",
+            "(userinfo hidden)",
+        ))
     return out
 
 
@@ -197,10 +252,10 @@ def _scan_text_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
     flags = {"env_ref": False, "url": False}
     for lineno, line in enumerate(text.splitlines(), start=1):
         out.extend(_secret_findings(line, file_label, lineno, "in file"))
+        out.extend(_userinfo_findings(line, file_label, lineno))
         # bearer literal (skip ordinary prose like "Bearer authentication")
         for m in BEARER_RE.finditer(line):
-            token = m.group(1).lower()
-            if token in _BEARER_PROSE_WORDS:
+            if _is_bearer_prose(m.group(1)):
                 continue
             out.append(Finding(
                 file_label, lineno, "FAIL", "bearer-literal",
@@ -252,8 +307,9 @@ def _scan_json_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
     flags = {"env_ref": False, "url": False}
     for path_, value in sink:
         out.extend(_secret_findings(value, file_label, 0, f"at JSON path {path_}"))
+        out.extend(_userinfo_findings(value, file_label, 0))
         for m in BEARER_RE.finditer(value):
-            if m.group(1).lower() in _BEARER_PROSE_WORDS:
+            if _is_bearer_prose(m.group(1)):
                 continue
             out.append(Finding(
                 file_label, 0, "FAIL", "bearer-literal",

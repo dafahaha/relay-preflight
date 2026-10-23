@@ -279,6 +279,30 @@ def test_homepage_url_http_not_fail():
     assert not any(f.rule == "plaintext-url" and f.severity == "FAIL" for f in fs)
 
 
+def test_database_url_http_not_upgraded_to_fail():
+    # `database_url` contains the substring `base_url` but is not an endpoint.
+    fs = rp.scan_text('"database_url": "http://example.com/db"', "cfg.json")
+    assert not any(f.rule == "plaintext-url" and f.severity == "FAIL" for f in fs)
+
+
+def test_non_key_env_substrings_no_false_context():
+    # AUTHORITY/COMPASS/CREDIT contain AUTH/PASS/CRED as substrings only.
+    for name in ("AUTHORITY_URL", "COMPASS_MODE", "CREDIT_LIMIT"):
+        assert rp._is_key_name(name) is False
+    assert rp._is_key_name("RELAY_KEY") is True
+    assert rp._is_key_name("API_TOKEN") is True
+
+
+def test_loopback_whole_127_range():
+    for url in ("http://127.0.0.2:8080/x", "http://localhost.:8080/x"):
+        assert rp._is_loopback_url(url) is True
+
+
+def test_url_userinfo_credentials_fail():
+    fs = rp.scan_text("base_url=http://user:pass123@example.com/api", "cfg")
+    assert any(f.rule == "url-userinfo-credential" and f.severity == "FAIL" for f in fs)
+
+
 def test_usage_error_exits_one():
     with pytest.raises(SystemExit) as e:
         rp.main([])

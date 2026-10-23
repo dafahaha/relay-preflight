@@ -1,5 +1,23 @@
 # Changelog — relay-preflight
 
+v1.4.0 — 2026-10-23
+
+## Round-6 independent clean review (fresh reviewer, cold reading)
+- P2-1 (fixed): the endpoint-field regex is anchored at a boundary so a field
+  such as `database_url` (contains `base_url`) or `nameserver_url` (contains
+  `server_url`) is not upgraded to FAIL.
+- P2-2 (fixed): key-name detection matches exact words (split on `_`/`-`/
+  camelCase), so `AUTHORITY_URL`/`COMPASS_MODE`/`CREDIT_LIMIT` are no longer
+  misread as secret context; real `RELAY_KEY`/`API_TOKEN` still match.
+- P2-3 (fixed): loopback covers the whole 127.0.0.0/8 range (not just .1),
+  strips a trailing dot, and handles an IPv4-mapped loopback.
+- P2-4 (fixed): the Bearer prose filter splits on punctuation so
+  `Bearer example.com` is not a false FAIL.
+- P2-5 (fixed): credentials embedded in a URL's userinfo
+  (`scheme://user:pass@host`) are now flagged FAIL.
+- New tests: database_url, non-key substrings, 127-range, URL userinfo.
+  Suite: 39 -> 43.
+
 v1.3.0 — 2026-10-23
 
 ## Round-5 independent technical review (fresh reviewer, cold reading)
