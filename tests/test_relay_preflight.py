@@ -422,3 +422,32 @@ def test_underscore_prefix_sk_not_word_boundary():
     # R9 P2-6: "_sk-abcdef1234" is still an inline secret.
     fs = rp.scan_text("_sk-abcdef123456", "cfg")
     assert any(f.rule == "inline-secret" and f.severity == "FAIL" for f in fs)
+
+
+def test_bearer_prose_with_trailing_period_not_fail():
+    # R10 P2-1: "Bearer authorization." is prose, not a credential.
+    fs = rp.scan_text("See the Bearer authorization. section.", "cfg")
+    assert not any(f.rule == "bearer-literal" for f in fs)
+
+
+def test_hyphenated_assignment_left_value_is_key_context():
+    # R10 P2-2: "api-key: xyz" is a key assignment (env_ref set).
+    assert rp._key_assignment_ref("api-key: xyz123") is True
+
+
+def test_empty_username_userinfo_detected():
+    # R10 P2-3: "http://:pass@host" (empty username) is userinfo.
+    fs = rp.scan_text("http://:secretpass@host.example.com/v1", "cfg")
+    assert any(f.rule == "url-userinfo-credential" and f.severity == "FAIL" for f in fs)
+
+
+def test_monkey_not_split_into_key():
+    # R10 P2-4: "monkey" must not be read as a key name.
+    assert rp._is_key_name("monkey") is False
+    assert rp._is_key_name("turkey") is False
+
+
+def test_ipv4_mapped_loopback_recognized():
+    # R10 P2-5: ::ffff:127.0.0.1 is loopback.
+    assert rp._is_loopback_host("::ffff:127.0.0.1") is True
+    assert rp._is_loopback_host("::ffff:8.8.8.8") is False

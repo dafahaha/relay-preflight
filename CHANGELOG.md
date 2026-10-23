@@ -1,5 +1,13 @@
 # Changelog — relay-preflight
 
+v1.8.0 — 2026-10-23
+- P2-1 (fixed): "Bearer authorization." (trailing sentence mark) is prose.
+- P2-2 (fixed): hyphenated assignment left-values ("api-key:") are recognized.
+- P2-3 (fixed): empty-username userinfo (":pass@host") is detected.
+- P2-4 (fixed): monkey/turkey/donkey are not split into a false key name.
+- P2-5 (fixed): IPv4-mapped loopback (::ffff:127.0.0.1) is recognized.
+- Suite: 66 pytest.
+
 v1.7.0 — 2026-10-23
 
 ## Round-9 independent clean review (fresh reviewer, cold reading)

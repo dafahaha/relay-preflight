@@ -56,8 +56,8 @@ _BEARER_PROSE_WORDS = {
 }
 URL_RE = re.compile(r"https?://[^\s\"'\\,)]+")
 # Credentials embedded inline in a URL's userinfo: scheme://user:pass@host.
-# The password segment may be empty ("user:@host"); the username is required.
-URL_USERINFO_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s@]+:[^/\s@]*@")
+# Either segment may be empty ("user:@host" / ":pass@host"); a colon marks it.
+URL_USERINFO_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^/\s@:]+)?:[^/\s@]*@")
 # Env-var references: ${VAR} (paired braces, optionally with a shell
 # default-value expansion such as ${VAR:-default} or the POSIX ${VAR=default})
 # or $VAR (word boundary).
@@ -83,10 +83,14 @@ TEXT_ENDPOINT_ASSIGN_RE = re.compile(
     r"(?:base[_-]?url|api[_-]?url|server[_-]?url|endpoint)\s*[:=]\s*[\"']?https?://",
     re.IGNORECASE,
 )
-# Text configs: a key-named assignment left-value, e.g. RELAY_API_KEY=xyz.
-ASSIGN_LEFT_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*[:=]")
+# Text configs: a key-named assignment left-value, e.g. RELAY_API_KEY=xyz or
+# a hyphenated "api-key: xyz" (the hyphen is split out by _var_words).
+ASSIGN_LEFT_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_\-]*)\s*[:=]")
 # A trailing key word even when concatenated without a separator (apikey).
 _CONCAT_KEY_RE = re.compile(r"(key|secret|token|password|credential|credentials)$")
+# Ordinary words that happen to end in a key suffix ("monkey" -> "mon"+"key")
+# and must not be split into a false key name.
+_NON_KEY_WORDS = {"monkey", "turkey", "donkey", "jockey", "hockey"}
 
 
 def _var_words(name: str) -> list[str]:
@@ -97,6 +101,9 @@ def _var_words(name: str) -> list[str]:
     for part in re.split(r"[_\-]+", name):
         for w in re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part):
             wl = w.lower()
+            if wl in _NON_KEY_WORDS:
+                words.append(wl)
+                continue
             m = _CONCAT_KEY_RE.search(wl)
             if m and m.start() > 0:
                 words.append(wl[:m.start()])
@@ -221,9 +228,15 @@ def _is_loopback_host(host: str) -> bool:
     if h in LOOPBACK_HOSTS or h == "localhost":
         return True
     try:
-        return ipaddress.ip_address(h).is_loopback
+        addr = ipaddress.ip_address(h)
     except ValueError:
         return False
+    # The standard library reports is_loopback=False for an IPv4-mapped address
+    # (::ffff:127.0.0.1); inspect the embedded v4 address explicitly.
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        return mapped.is_loopback
+    return addr.is_loopback
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -245,8 +258,9 @@ def _is_bearer_prose(token: str) -> bool:
     """True when a Bearer 'token' is really prose. Only a single prose word
     ("authentication", "token", "header") is filtered; a composite value such
     as "abc.token.def" merely containing a prose segment is treated as a real
-    credential (fail-closed) rather than silently skipped."""
-    return token.lower() in _BEARER_PROSE_WORDS
+    credential (fail-closed) rather than silently skipped. A trailing sentence
+    mark ("Bearer authorization.") is punctuation, not part of the word."""
+    return token.lower().rstrip(".,;:!?") in _BEARER_PROSE_WORDS
 
 
 def _secret_findings(value: str, file_label: str, line: int, where: str) -> list[Finding]:
