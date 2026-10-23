@@ -1,5 +1,17 @@
 # Changelog — relay-preflight
 
+v1.5.0 — 2026-10-23
+
+## Round-7 independent clean review (fresh reviewer, cold reading)
+- Prose Bearer plural forms ("tokens", "examples") are no longer flagged, and
+  prose Bearer text no longer upgrades a documentation link to FAIL.
+- A `127.` prefix is validated as a proper dotted-quad (so "127.evil.com" /
+  "127.999.1.1" is not mistaken for loopback).
+- A malformed port no longer aborts the whole scan; the host is kept.
+- A shell default-value expansion (`${VAR:-default}`) is stripped before the
+  variable name is inspected.
+- Suite: 48 tests (5 added).
+
 v1.4.0 — 2026-10-23
 
 ## Round-6 independent clean review (fresh reviewer, cold reading)

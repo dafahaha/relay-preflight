@@ -307,3 +307,30 @@ def test_usage_error_exits_one():
     with pytest.raises(SystemExit) as e:
         rp.main([])
     assert e.value.code == 1
+
+
+def test_bearer_plural_prose_not_flagged():
+    # "Bearer tokens" / "examples" are prose, not a credential.
+    assert rp.scan_text("# Bearer tokens available from the docs", "cfg") == []
+
+
+def test_prose_bearer_does_not_upgrade_doc_link():
+    # A doc link beside prose "Bearer token" must stay WARN, not FAIL.
+    fs = rp.scan_text("read the Bearer token docs at http://example.com/guide", "cfg")
+    assert not any(f.severity == "FAIL" for f in fs)
+
+
+def test_invalid_127_name_not_loopback():
+    # A name '127.evil.com' or invalid '127.999.1.1' must not be treated as loopback.
+    assert rp._is_loopback_url("http://127.evil.com/x") is False
+    assert rp._is_loopback_url("http://127.999.1.1/x") is False
+
+
+def test_redact_url_malformed_port_keeps_host():
+    # A malformed port must not raise; the host is retained.
+    assert rp.redact_url("http://example.com:99999/x") == "http://example.com"
+
+
+def test_key_env_default_expansion_recognized():
+    # ${VAR:-default} must still be recognized from its name.
+    assert rp._key_env_ref("${SECRET:-changeme}") is True

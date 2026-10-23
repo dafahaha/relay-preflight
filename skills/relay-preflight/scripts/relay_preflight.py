@@ -45,14 +45,19 @@ JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+")
 # filtered explicitly (see _BEARER_PROSE_WORDS).
 BEARER_RE = re.compile(r"(?i)bearer\s+[\"']?([A-Za-z0-9_\-\.]{8,})")
 _BEARER_PROSE_WORDS = {
-    "authentication", "authorization", "token", "scheme", "header", "headers",
-    "credentials", "credential", "required", "flow", "example",
+    "authentication", "authorization", "token", "tokens", "scheme", "header",
+    "headers", "credentials", "credential", "required", "flow", "example",
+    "examples",
 }
 URL_RE = re.compile(r"https?://[^\s\"'\\,)]+")
 # Credentials embedded inline in a URL's userinfo: scheme://user:pass@host.
 URL_USERINFO_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s@]+:[^/\s@]+@")
-# Env-var references: ${VAR} (paired braces) or $VAR (word boundary).
-ENV_REF_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*\b")
+# Env-var references: ${VAR} (paired braces, optionally with a shell
+# default-value expansion such as ${VAR:-default}) or $VAR (word boundary).
+ENV_REF_RE = re.compile(
+    r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::[-=?+][^}]*)?\}"
+    r"|\$[A-Za-z_][A-Za-z0-9_]*\b"
+)
 # Exact key words (matched per variable-name word, not as a substring), so
 # AUTHORITY/COMPASS/CREDIT are not misread as key names.
 KEY_WORDS = {
@@ -85,7 +90,19 @@ def _key_env_ref(text: str) -> bool:
     for m in ENV_REF_RE.finditer(text):
         # Strip the leading $ and any braces to inspect the variable name.
         name = m.group(0).lstrip("$").strip("{}")
+        # Drop a shell default-value expansion (${VAR:-default} / ${VAR:=x})
+        # so the default text does not pollute the name's word split.
+        name = re.split(r":[-=?+]", name, maxsplit=1)[0]
         if _is_key_name(name):
+            return True
+    return False
+
+
+def _has_bearer_literal(text: str) -> bool:
+    """True when the text carries a real Bearer credential (prose such as
+    "Bearer token/docs" is filtered, the same way the finding paths do)."""
+    for m in BEARER_RE.finditer(text):
+        if not _is_bearer_prose(m.group(1)):
             return True
     return False
 
@@ -94,7 +111,7 @@ def _has_secret_context(text: str) -> bool:
     """True when the same string carries a literal secret, Bearer, or key env ref."""
     return bool(
         SK_RE.search(text) or PK_RE.search(text) or JWT_RE.search(text)
-        or BEARER_RE.search(text) or _key_env_ref(text)
+        or _has_bearer_literal(text) or _key_env_ref(text)
     )
 
 # Plaintext http on the loopback interface never leaves the machine; it is a
@@ -130,8 +147,14 @@ def redact_url(url: str) -> str:
         return "(unparseable URL, hidden)"
     host = (parts.hostname or "").strip("[]").lower()
     netloc = host
-    if parts.port:
-        netloc = f"{host}:{parts.port}"
+    # A malformed port (e.g. :abc, :99999) must not abort the whole scan; keep
+    # just the host when the port is unusable.
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if port:
+        netloc = f"{host}:{port}"
     if not netloc:
         return "(no host, hidden)"
     return f"{parts.scheme}://{netloc}"
@@ -145,16 +168,28 @@ def _host_of(url: str) -> str:
         return ""
 
 
+def _is_valid_ipv4_octets(text: str) -> bool:
+    """True when text is a dotted-quad with every octet in 0..255."""
+    parts = text.split(".")
+    if len(parts) != 4:
+        return False
+    for p in parts:
+        if not p.isdigit() or not (0 <= int(p) <= 255):
+            return False
+    return True
+
+
 def _is_loopback_host(host: str) -> bool:
     """Loopback by the whole 127.0.0.0/8 range (not just .1), localhost, IPv6
-    ::1, and an IPv4-mapped loopback (::ffff:127.x)."""
+    ::1, and an IPv4-mapped loopback (::ffff:127.x). A name such as
+    '127.evil.com' or an invalid '127.999.1.1' is NOT treated as loopback."""
     h = host
     if h in LOOPBACK_HOSTS or h == "localhost":
         return True
-    if h.startswith("127."):
+    if h.startswith("127.") and _is_valid_ipv4_octets(h):
         return True
     m = re.match(r"^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$", h)
-    if m:
+    if m and _is_valid_ipv4_octets(m.group(1)):
         return m.group(1).startswith("127.")
     return False
 
