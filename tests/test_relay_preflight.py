@@ -492,3 +492,45 @@ def test_ipv4_mapped_bind_all_recognized():
     # R11 P2-6: ::ffff:0.0.0.0 is a bind-all (unspecified) address.
     assert rp._is_bind_all_url("http://[::ffff:0.0.0.0]/") is True
     assert rp._is_bind_all_url("http://[::ffff:8.8.8.8]/") is False
+
+
+# ---- R12: JSON channel precision, CLI flag form, Stripe underscore keys ----
+
+def test_json_key_named_field_http_not_fail():
+    # R12 P1: a key-named metadata field (not a relay endpoint) over http is
+    # WARN nonendpoint, not FAIL, matching the text channel.
+    fs = rp.scan_json('{"verification_public_key_url": "http://example.com/verify"}', "m.json")
+    assert not any(f.rule == "plaintext-url" and f.severity == "FAIL" for f in fs)
+    assert any(f.rule == "nonendpoint-http" and f.severity == "WARN" for f in fs)
+
+
+def test_flag_form_endpoint_http_is_fail():
+    # R12 P2: a space-separated CLI flag (--base-url http://...) is a real
+    # relay endpoint and must be FAIL, not downgraded to WARN.
+    fs = rp.scan_text("relay --base-url http://relay.example.com/v1", "run.sh")
+    assert any(f.rule == "plaintext-url" and f.severity == "FAIL" for f in fs)
+
+
+def test_stripe_underscore_keys_detected():
+    # R12 P2: Stripe uses underscore separators (pk_live_/sk_live_/pk_test_).
+    for k in ("pk_live_abcdef123456", "sk_live_abcdef123456",
+              "pk_test_abcdef123456", "sk_test_abcdef123456"):
+        fs = rp.scan_text(f"key: {k}", "cfg")
+        assert any(f.rule == "inline-secret" and f.severity == "FAIL" for f in fs), k
+
+
+def test_bearer_colon_base64_form_caught():
+    # R12 P2: the "Bearer: <token>" form and base64 chars (+, /, =) are caught.
+    fs = rp.scan_text("Authorization: Bearer: abc+/def==ghi", "cfg.txt")
+    assert any(f.rule == "bearer-literal" for f in fs)
+
+
+def test_whiskey_not_key_name():
+    # R12 P2: whiskey/whisky must not be split into a false "key" word.
+    assert rp._is_key_name("whiskey") is False
+    assert rp._is_key_name("whisky") is False
+
+
+def test_redact_url_strips_trailing_host_dot():
+    # R12 P2: a trailing host dot is trimmed in the redacted URL.
+    assert rp.redact_url("http://example.com./path") == "http://example.com"

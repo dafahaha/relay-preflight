@@ -1,5 +1,25 @@
 # Changelog — relay-preflight
 
+v1.10.0 — 2026-10-23
+
+## Round-12 independent clean review (fresh reviewer, cold reading)
+- P1 (fixed): the JSON path no longer upgrades a plaintext http link to FAIL
+  merely because the field name contains "key" (e.g.
+  `verification_public_key_url`); FAIL requires a real endpoint field
+  (base_url/api_url/server_url/endpoint), matching the text channel. A literal
+  secret in the value still emits its own inline-secret FAIL.
+- P2 (fixed): a space-separated CLI flag (`--base-url http://...`) is treated
+  as a real endpoint and FAILs, not downgraded to WARN.
+- P2 (fixed): Stripe underscore keys (`pk_live_/sk_live_/pk_test_/sk_test_`)
+  are detected alongside the hyphen (OpenAI-style) forms.
+- P2 (fixed): the "Bearer: <token>" form and base64 token chars (+, /, =) are
+  accepted.
+- P2 (fixed): whiskey/whisky no longer split into a false "key" word; a
+  redacted URL trims a trailing host dot.
+- P2 (documented): a literal secret is flagged even in comments (a
+  commented-out real key is still a committed secret).
+- Suite: 77 pytest (6 added).
+
 v1.9.0 — 2026-10-23
 
 ## Round-11 independent clean review (fresh reviewer, cold reading)

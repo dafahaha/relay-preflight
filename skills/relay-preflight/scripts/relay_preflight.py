@@ -13,7 +13,9 @@ Scans local config files the user points at (``.mcp.json``, Claude
 
 It never reads environment variable *values*, never sends a network request,
 and never prints a secret: every token in the report is masked and every URL is
-reduced to scheme://host:port (userinfo/query stripped). This is hygiene only —
+reduced to scheme://host:port (userinfo/query stripped). A literal secret is
+flagged even when the line is a comment (a commented-out real key is still a
+committed secret); only an env-var reference is safe. This is hygiene only —
 it does not judge whether the upstream model is genuine (that needs a separate
 probe tool).
 
@@ -38,8 +40,10 @@ from urllib.parse import urlparse
 # sk-... literal (covers sk-ant- etc.); pk-live/pk-test secret keys; a compact
 # JWT (eyJ header.payload.signature); Bearer token literal. The negative
 # lookbehind keeps `sk-`/`pk-` from matching inside ordinary words (desk-, risk-).
-SK_RE = re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{6,}")
-PK_RE = re.compile(r"(?<![A-Za-z0-9])pk-(?:live|test)-[A-Za-z0-9_\-]{6,}")
+# Both hyphen (OpenAI-style) and underscore (Stripe-style sk_live_/pk_live_,
+# sk_test_/pk_test_) separators are accepted.
+SK_RE = re.compile(r"(?<![A-Za-z0-9])sk[-_](?:(?:live|test)[-_])?[A-Za-z0-9_\-]{6,}")
+PK_RE = re.compile(r"(?<![A-Za-z0-9])pk[-_](?:live|test)[-_][A-Za-z0-9_\-]{6,}")
 # JWTs are base64url by spec, but some implementations emit standard base64
 # (with +, /) and trailing '=' padding; accept both.
 JWT_RE = re.compile(
@@ -48,7 +52,10 @@ JWT_RE = re.compile(
 # A real Bearer credential is a long token; prose ("Bearer authentication",
 # "Bearer token/scheme/header") must not match. Common prose words are also
 # filtered explicitly (see _BEARER_PROSE_WORDS).
-BEARER_RE = re.compile(r"(?i)bearer[\s=]+[\"']?([A-Za-z0-9_\-\.]{8,})")
+# Separators allow whitespace, "=" and ":" (the "Bearer: <token>" form); the
+# token charset includes base64 letters (+, /, =) so a non-JWT base64 Bearer
+# is not missed.
+BEARER_RE = re.compile(r"(?i)bearer[\s=:]+[\"']?([A-Za-z0-9_\-\.\+/=]{8,})")
 _BEARER_PROSE_WORDS = {
     "authentication", "authorization", "token", "tokens", "scheme", "header",
     "headers", "credentials", "credential", "required", "flow", "example",
@@ -85,6 +92,12 @@ TEXT_ENDPOINT_ASSIGN_RE = re.compile(
     r"(?:base[_-]?url|api[_-]?url|server[_-]?url|endpoint)\s*[:=]\s*[\"']?https?://",
     re.IGNORECASE,
 )
+# Text configs: a CLI flag form with a space (--base-url http://...). The double
+# dash prefix keeps it from matching prose such as "the endpoint at http://...".
+TEXT_ENDPOINT_FLAG_RE = re.compile(
+    r"--(?:base[_-]?url|api[_-]?url|server[_-]?url|endpoint)\s+[\"']?https?://",
+    re.IGNORECASE,
+)
 # Text configs: a key-named assignment left-value, e.g. RELAY_API_KEY=xyz or
 # a hyphenated "api-key: xyz" (the hyphen is split out by _var_words).
 ASSIGN_LEFT_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_\-]*)\s*[:=]")
@@ -92,7 +105,7 @@ ASSIGN_LEFT_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_\-]*)\s*[:=]")
 _CONCAT_KEY_RE = re.compile(r"(key|secret|token|password|credential|credentials)$")
 # Ordinary words that happen to end in a key suffix ("monkey" -> "mon"+"key")
 # and must not be split into a false key name.
-_NON_KEY_WORDS = {"monkey", "turkey", "donkey", "jockey", "hockey"}
+_NON_KEY_WORDS = {"monkey", "turkey", "donkey", "jockey", "hockey", "whiskey", "whisky"}
 
 
 def _var_words(name: str) -> list[str]:
@@ -197,7 +210,7 @@ def redact_url(url: str) -> str:
         parts = urlparse(url)
         # Accessing .hostname can raise on a malformed IPv6 bracket even when
         # urlparse returns; guard it so one bad URL cannot abort the whole scan.
-        host = (parts.hostname or "").strip("[]").lower()
+        host = (parts.hostname or "").strip("[]").rstrip(".").lower()
     except ValueError:
         return "(unparseable URL, hidden)"
     netloc = host
@@ -329,10 +342,11 @@ def _http_findings(line: str, file_label: str, lineno: int) -> tuple[list[Findin
                 "is reachable off-machine — prefer https:// or bind 127.0.0.1 for local-only",
                 red,
             ))
-        elif TEXT_ENDPOINT_ASSIGN_RE.search(line):
-            # A real endpoint assignment (base_url=http://...) ties the URL to a
-            # relay base. A literal secret/bearer on the line already emits its
-            # own FAIL; a mere env-ref/key name merely co-occurring in a comment
+        elif TEXT_ENDPOINT_ASSIGN_RE.search(line) or TEXT_ENDPOINT_FLAG_RE.search(line):
+            # A real endpoint assignment (base_url=http://...) or a CLI flag
+            # (--base-url http://...) ties the URL to a relay base. A literal
+            # secret/bearer on the line already emits its own FAIL; a mere
+            # env-ref/key name merely co-occurring in a comment
             # ("# docs http://... and use $RELAY_API_KEY") is NOT upgraded to
             # FAIL — that aligns with the JSON branch's field-name precision.
             out.append(Finding(
@@ -454,8 +468,12 @@ def _scan_json_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
                         "(not loopback); reachable off-machine — prefer https or bind 127.0.0.1",
                         redact_url(url),
                     ))
-                elif ENDPOINT_FIELD_RE.search(key_name) or _is_key_name(key_name) \
-                        or _has_secret_context(value):
+                elif ENDPOINT_FIELD_RE.search(key_name):
+                    # A real endpoint field (base_url/api_url/server_url/endpoint),
+                    # matching the text channel's precision. A bare key-named
+                    # field (e.g. verification_public_key_url) is NOT a relay
+                    # base and must not be upgraded; a literal secret in the
+                    # value already emits its own inline-secret FAIL.
                     out.append(Finding(
                         file_label, 0, "FAIL", "plaintext-url",
                         f"http:// public endpoint at JSON path {path_}; use https://",
@@ -464,7 +482,7 @@ def _scan_json_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
                 else:
                     out.append(Finding(
                         file_label, 0, "WARN", "nonendpoint-http",
-                        f"http:// link at JSON path {path_} with no key/endpoint context; "
+                        f"http:// link at JSON path {path_} with no endpoint context; "
                         "review manually, not treated as a relay base_url",
                         redact_url(url),
                     ))
