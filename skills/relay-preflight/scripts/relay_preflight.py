@@ -48,7 +48,7 @@ JWT_RE = re.compile(
 # A real Bearer credential is a long token; prose ("Bearer authentication",
 # "Bearer token/scheme/header") must not match. Common prose words are also
 # filtered explicitly (see _BEARER_PROSE_WORDS).
-BEARER_RE = re.compile(r"(?i)bearer\s+[\"']?([A-Za-z0-9_\-\.]{8,})")
+BEARER_RE = re.compile(r"(?i)bearer[\s=]+[\"']?([A-Za-z0-9_\-\.]{8,})")
 _BEARER_PROSE_WORDS = {
     "authentication", "authorization", "token", "tokens", "scheme", "header",
     "headers", "credentials", "credential", "required", "flow", "example",
@@ -57,7 +57,9 @@ _BEARER_PROSE_WORDS = {
 URL_RE = re.compile(r"https?://[^\s\"'\\,)]+")
 # Credentials embedded inline in a URL's userinfo: scheme://user:pass@host.
 # Either segment may be empty ("user:@host" / ":pass@host"); a colon marks it.
-URL_USERINFO_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^/\s@:]+)?:[^/\s@]*@")
+# The two segments are captured so an EMPTY userinfo ("://:@host") is not a
+# credential and is skipped by the finding functions.
+URL_USERINFO_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://([^/\s@:]*):([^/\s@]*)@")
 # Env-var references: ${VAR} (paired braces, optionally with a shell
 # default-value expansion such as ${VAR:-default} or the POSIX ${VAR=default})
 # or $VAR (word boundary).
@@ -244,14 +246,19 @@ def _is_loopback_url(url: str) -> bool:
 
 
 def _is_bind_all_url(url: str) -> bool:
-    """Bind-all (unspecified) addresses: 0.0.0.0 and :: via ipaddress."""
+    """Bind-all (unspecified) addresses: 0.0.0.0 and :: via ipaddress, plus an
+    IPv4-mapped unspecified form (::ffff:0.0.0.0)."""
     h = _host_of(url)
     if h in BIND_ALL_HOSTS:
         return True
     try:
-        return ipaddress.ip_address(h).is_unspecified
+        addr = ipaddress.ip_address(h)
     except ValueError:
         return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        return mapped.is_unspecified
+    return addr.is_unspecified
 
 
 def _is_bearer_prose(token: str) -> bool:
@@ -282,9 +289,13 @@ def _secret_findings(value: str, file_label: str, line: int, where: str) -> list
 
 
 def _userinfo_findings(value: str, file_label: str, line: int) -> list[Finding]:
-    """Credentials embedded inline in a URL userinfo (scheme://user:pass@host)."""
+    """Credentials embedded inline in a URL userinfo (scheme://user:pass@host).
+    An empty userinfo with neither a user nor a password ("://:@host") is not a
+    credential and is skipped."""
     out: list[Finding] = []
     for m in URL_USERINFO_RE.finditer(value):
+        if m.group(1) == "" and m.group(2) == "":
+            continue
         out.append(Finding(
             file_label, line, "FAIL", "url-userinfo-credential",
             "credentials embedded inline in a URL's userinfo; pass them via env, not in the URL",
@@ -318,21 +329,24 @@ def _http_findings(line: str, file_label: str, lineno: int) -> tuple[list[Findin
                 "is reachable off-machine — prefer https:// or bind 127.0.0.1 for local-only",
                 red,
             ))
-        elif TEXT_ENDPOINT_ASSIGN_RE.search(line) or _has_secret_context(line):
-            # Endpoint context: an explicit endpoint assignment or a key/env
-            # reference on the same line. Prose "configure the endpoint" alone
-            # does not qualify (that falls through to the non-endpoint WARN).
+        elif TEXT_ENDPOINT_ASSIGN_RE.search(line):
+            # A real endpoint assignment (base_url=http://...) ties the URL to a
+            # relay base. A literal secret/bearer on the line already emits its
+            # own FAIL; a mere env-ref/key name merely co-occurring in a comment
+            # ("# docs http://... and use $RELAY_API_KEY") is NOT upgraded to
+            # FAIL — that aligns with the JSON branch's field-name precision.
             out.append(Finding(
                 file_label, lineno, "FAIL", "plaintext-url",
                 "http:// public base_url sends the relay key over plaintext; use https://",
                 red,
             ))
         else:
-            # Non-endpoint http (doc link, example) with no key context: WARN,
-            # not a FAIL — it is not being used as a relay base_url.
+            # Non-endpoint http (doc link, example, or a key reference only
+            # co-occurring in prose): WARN, not a FAIL — it is not tied to a
+            # relay base_url assignment.
             out.append(Finding(
                 file_label, lineno, "WARN", "nonendpoint-http",
-                "http:// link with no key/endpoint context; review manually, "
+                "http:// link with no endpoint assignment; review manually, "
                 "not treated as a relay base_url",
                 red,
             ))
@@ -363,7 +377,7 @@ def _scan_text_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
     if flags["env_ref"] and not flags["url"]:
         out.append(Finding(
             file_label, 0, "WARN", "no-base-url",
-            "an env-var key reference exists but no base_url/endpoint was found in this file",
+            "a key is configured (env reference or key-named field) but no base_url/endpoint was found in this file",
             "",
         ))
     return out, flags
@@ -408,6 +422,9 @@ def _scan_json_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
         # The JSON key for this value (last path segment, array index stripped)
         # is itself evidence when it is a key/endpoint name.
         key_name = _last_key(path_)
+        # A key-named field means a key is configured (a literal value is also
+        # caught by inline-secret FAIL); either way the no-base-url completeness
+        # WARN applies when no endpoint is declared.
         if _is_key_name(key_name):
             flags["env_ref"] = True
         out.extend(_secret_findings(value, file_label, 0, f"at JSON path {path_}"))
@@ -456,7 +473,7 @@ def _scan_json_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
     if flags["env_ref"] and not flags["url"]:
         out.append(Finding(
             file_label, 0, "WARN", "no-base-url",
-            "an env-var key reference exists but no base_url/endpoint was found", "",
+            "a key is configured (env reference or key-named field) but no base_url/endpoint was found", "",
         ))
     return out, flags
 
@@ -533,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
         if any_env_ref and not any_url:
             all_findings.append(Finding(
                 "(across files)", 0, "WARN", "no-base-url",
-                "an env-var key reference exists but no base_url/endpoint was found "
+                "a key is configured (env reference or key-named field) but no base_url/endpoint was found "
                 "in any scanned file", "",
             ))
 

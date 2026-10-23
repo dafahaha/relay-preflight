@@ -1,5 +1,22 @@
 # Changelog — relay-preflight
 
+v1.9.0 — 2026-10-23
+
+## Round-11 independent clean review (fresh reviewer, cold reading)
+- P1 (fixed): the text path no longer upgrades a plaintext http link to FAIL
+  merely because an env reference / key name co-occurs on the same line (e.g. a
+  comment "# docs http://... and use $RELAY_API_KEY"). FAIL requires a real
+  endpoint assignment (or a literal secret/bearer, which emits its own FAIL),
+  aligning with the JSON branch's field-name precision.
+- P2-2 (fixed): an empty userinfo ("://:@host") is not a credential and is
+  skipped; non-empty userinfo with either segment populated is still flagged.
+- P2-3 (fixed): `Bearer=token` is detected in addition to `Bearer token`.
+- P2-5 (fixed): the no-base-url message now accurately says "a key is
+  configured" (env reference or key-named field) rather than asserting an
+  env-var reference exists.
+- P2-6 (fixed): an IPv4-mapped bind-all address (::ffff:0.0.0.0) is recognized.
+- Suite: 71 pytest (5 added).
+
 v1.8.0 — 2026-10-23
 - P2-1 (fixed): "Bearer authorization." (trailing sentence mark) is prose.
 - P2-2 (fixed): hyphenated assignment left-values ("api-key:") are recognized.

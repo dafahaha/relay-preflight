@@ -451,3 +451,44 @@ def test_ipv4_mapped_loopback_recognized():
     # R10 P2-5: ::ffff:127.0.0.1 is loopback.
     assert rp._is_loopback_host("::ffff:127.0.0.1") is True
     assert rp._is_loopback_host("::ffff:8.8.8.8") is False
+
+
+def test_comment_envref_http_link_not_fail():
+    # R11 P1: a comment co-occurring an http link and an env ref (no endpoint
+    # assignment, no literal secret) is WARN, not FAIL.
+    line = "# docs: http://example.com/setup and use $RELAY_API_KEY"
+    fs = rp.scan_text(line, "cfg.txt")
+    assert not any(f.severity == "FAIL" for f in fs)
+    assert any(f.rule == "nonendpoint-http" for f in fs)
+
+
+def test_endpoint_assignment_http_still_fail():
+    # Control: a real base_url=http://... assignment is still FAIL.
+    line = "base_url=http://relay.example.com/v1"
+    fs = rp.scan_text(line, "cfg.txt")
+    assert any(f.severity == "FAIL" and f.rule == "plaintext-url" for f in fs)
+
+
+def test_empty_userinfo_not_flagged():
+    # R11 P2-2: an empty userinfo "://:@host" is not a credential (no FAIL).
+    assert not any(f.rule == "url-userinfo-credential"
+                   for f in rp.scan_text("http://:@host/", "cfg.txt"))
+    # A non-empty userinfo with either segment is still flagged.
+    assert any(f.rule == "url-userinfo-credential"
+               for f in rp.scan_text("http://:pass@host/", "cfg.txt"))
+    # Identity-only (no colon, no password) is not a userinfo credential.
+    assert not any(f.rule == "url-userinfo-credential"
+                   for f in rp.scan_text("http://user@host/", "cfg.txt"))
+
+
+def test_bearer_equals_form_caught():
+    # R11 P2-3: Bearer=token is caught (not only "Bearer token").
+    line = "Authorization:Bearer=abcdefgh1234"
+    fs = rp.scan_text(line, "cfg.txt")
+    assert any(f.rule == "bearer-literal" for f in fs)
+
+
+def test_ipv4_mapped_bind_all_recognized():
+    # R11 P2-6: ::ffff:0.0.0.0 is a bind-all (unspecified) address.
+    assert rp._is_bind_all_url("http://[::ffff:0.0.0.0]/") is True
+    assert rp._is_bind_all_url("http://[::ffff:8.8.8.8]/") is False
