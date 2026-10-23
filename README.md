@@ -77,7 +77,7 @@ python skills/relay-preflight/scripts/relay_preflight.py .mcp.json settings.json
 python -m pytest tests/ -q
 ```
 
-34 tests, stdlib only; manual predicate-mutation spot checks (inverting the
+39 tests, stdlib only; manual predicate-mutation spot checks (inverting the
 http/https gate turns the plaintext test red; recorded in CHANGELOG).
 
 ## Limits (honest)

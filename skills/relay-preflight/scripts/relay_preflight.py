@@ -34,23 +34,45 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from urllib.parse import urlparse
 
-# sk-... literal (covers sk-ant- etc., any length after prefix); pk-live/pk-test
-# secret keys; a compact JWT (eyJ header.payload.signature); Bearer token literal.
-SK_RE = re.compile(r"sk-[A-Za-z0-9_\-]{6,}")
-PK_RE = re.compile(r"pk-(?:live|test)-[A-Za-z0-9_\-]{6,}")
+# sk-... literal (covers sk-ant- etc.); pk-live/pk-test secret keys; a compact
+# JWT (eyJ header.payload.signature); Bearer token literal. The negative
+# lookbehind keeps `sk-`/`pk-` from matching inside ordinary words (desk-, risk-).
+SK_RE = re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{6,}")
+PK_RE = re.compile(r"(?<![A-Za-z0-9])pk-(?:live|test)-[A-Za-z0-9_\-]{6,}")
 JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+")
-BEARER_RE = re.compile(r"(?i)bearer\s+[A-Za-z0-9_\-\.]{6,}")
+# A real Bearer credential is a long token; prose ("Bearer authentication",
+# "Bearer token/scheme/header") must not match. Common prose words are also
+# filtered explicitly (see _BEARER_PROSE_WORDS).
+BEARER_RE = re.compile(r"(?i)bearer\s+[\"']?([A-Za-z0-9_\-\.]{8,})")
+_BEARER_PROSE_WORDS = {
+    "authentication", "authorization", "token", "scheme", "header", "credentials",
+    "credential", "required", "flow", "example",
+}
 URL_RE = re.compile(r"https?://[^\s\"'\\,)]+")
-ENV_REF_RE = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
-# A field name that marks an http URL as an actual endpoint (vs a doc link/example).
-ENDPOINT_FIELD_RE = re.compile(r"(base_?url|api_?url|server_?url|endpoint|url)", re.IGNORECASE)
+# Env-var references: ${VAR} (paired braces) or $VAR (word boundary).
+ENV_REF_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*\b")
+# Only an env reference whose name looks like a key counts for the no-base-url /
+# secret-context logic, so $HOME/$PATH in a shell snippet does not trip it.
+KEY_NAME_RE = re.compile(r"(KEY|TOKEN|SECRET|AUTH|PASS|CRED)", re.IGNORECASE)
+# A field name that marks an http URL as an actual endpoint (vs a doc link).
+# Anchored names only; a bare `url`/`homepage_url` substring must not match.
+ENDPOINT_FIELD_RE = re.compile(r"(base_?url|api_?url|server_?url|endpoint)", re.IGNORECASE)
+
+
+def _key_env_ref(text: str) -> bool:
+    """True when text carries an env reference whose name resembles a key."""
+    for m in ENV_REF_RE.finditer(text):
+        name = m.group(0)
+        if KEY_NAME_RE.search(name):
+            return True
+    return False
 
 
 def _has_secret_context(text: str) -> bool:
-    """True when the same string carries a literal secret, Bearer, or env ref."""
+    """True when the same string carries a literal secret, Bearer, or key env ref."""
     return bool(
         SK_RE.search(text) or PK_RE.search(text) or JWT_RE.search(text)
-        or BEARER_RE.search(text) or ENV_REF_RE.search(text)
+        or BEARER_RE.search(text) or _key_env_ref(text)
     )
 
 # Plaintext http on the loopback interface never leaves the machine; it is a
@@ -175,8 +197,11 @@ def _scan_text_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
     flags = {"env_ref": False, "url": False}
     for lineno, line in enumerate(text.splitlines(), start=1):
         out.extend(_secret_findings(line, file_label, lineno, "in file"))
-        # bearer literal
+        # bearer literal (skip ordinary prose like "Bearer authentication")
         for m in BEARER_RE.finditer(line):
+            token = m.group(1).lower()
+            if token in _BEARER_PROSE_WORDS:
+                continue
             out.append(Finding(
                 file_label, lineno, "FAIL", "bearer-literal",
                 "literal Bearer token in a command/args line; pass it via env, never inline",
@@ -185,7 +210,7 @@ def _scan_text_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
         findings, saw_url = _http_findings(line, file_label, lineno)
         out.extend(findings)
         flags["url"] |= saw_url
-        if ENV_REF_RE.search(line):
+        if _key_env_ref(line):
             flags["env_ref"] = True
 
     if flags["env_ref"] and not flags["url"]:
@@ -228,6 +253,8 @@ def _scan_json_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
     for path_, value in sink:
         out.extend(_secret_findings(value, file_label, 0, f"at JSON path {path_}"))
         for m in BEARER_RE.finditer(value):
+            if m.group(1).lower() in _BEARER_PROSE_WORDS:
+                continue
             out.append(Finding(
                 file_label, 0, "FAIL", "bearer-literal",
                 f"literal Bearer token at JSON path {path_}; pass via env",
@@ -263,7 +290,7 @@ def _scan_json_impl(text: str, file_label: str) -> tuple[list[Finding], dict]:
                         "review manually, not treated as a relay base_url",
                         redact_url(url),
                     ))
-        if ENV_REF_RE.search(value):
+        if _key_env_ref(value):
             flags["env_ref"] = True
     if flags["env_ref"] and not flags["url"]:
         out.append(Finding(
@@ -309,8 +336,17 @@ def format_report(findings: list[Finding]) -> str:
     return "\n".join(lines) + "\n"
 
 
+class _Parser(argparse.ArgumentParser):
+    """ArgumentParser whose usage errors exit 1 (argparse default is 2, which
+    collides with the WARN exit code). --help still exits 0."""
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
+
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Offline relay-key config hygiene check (no network, no env reads).")
+    ap = _Parser(description="Offline relay-key config hygiene check (no network, no env reads).")
     ap.add_argument("files", nargs="+", help="config files to scan (.mcp.json, settings.json, .env, ...)")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--output", default=None)
@@ -328,30 +364,32 @@ def main(argv: list[str] | None = None) -> int:
             all_findings.extend(findings)
             any_env_ref |= flags["env_ref"]
             any_url |= flags["url"]
-    except (FileNotFoundError, OSError) as exc:
+
+        # Aggregate across files: a key reference in A and the endpoint in B must
+        # not trip a per-file no-base-url WARN; drop per-file WARNs and emit one
+        # consolidated WARN only when no scanned file carries a URL.
+        all_findings = [f for f in all_findings if f.rule != "no-base-url"]
+        if any_env_ref and not any_url:
+            all_findings.append(Finding(
+                "(across files)", 0, "WARN", "no-base-url",
+                "an env-var key reference exists but no base_url/endpoint was found "
+                "in any scanned file", "",
+            ))
+
+        if args.json:
+            rendered = json.dumps({"findings": [asdict(f) for f in all_findings]},
+                                  indent=2, ensure_ascii=False)
+        else:
+            rendered = format_report(all_findings)
+
+        # Output writing stays inside the try so a bad path is a clean exit 1.
+        if args.output:
+            Path(args.output).write_text(rendered + "\n", encoding="utf-8")
+        else:
+            print(rendered)
+    except (ValueError, OSError) as exc:
         print(f"relay-preflight: error: {exc}", file=sys.stderr)
         return 1
-
-    # P3-3: aggregate across files. A key reference in A and the endpoint in B
-    # must not trip a per-file no-base-url WARN; drop per-file WARNs and emit one
-    # consolidated WARN only when no scanned file carries a URL.
-    all_findings = [f for f in all_findings if f.rule != "no-base-url"]
-    if any_env_ref and not any_url:
-        all_findings.append(Finding(
-            "(across files)", 0, "WARN", "no-base-url",
-            "an env-var key reference exists but no base_url/endpoint was found "
-            "in any scanned file", "",
-        ))
-
-    if args.json:
-        rendered = json.dumps({"findings": [asdict(f) for f in all_findings]}, indent=2, ensure_ascii=False)
-    else:
-        rendered = format_report(all_findings)
-
-    if args.output:
-        Path(args.output).write_text(rendered + "\n", encoding="utf-8")
-    else:
-        print(rendered)
 
     if any(f.severity == "FAIL" for f in all_findings):
         return 3

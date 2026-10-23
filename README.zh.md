@@ -69,7 +69,7 @@ python skills/relay-preflight/scripts/relay_preflight.py .mcp.json settings.json
 python -m pytest tests/ -q
 ```
 
-34 个测试，仅标准库；人工谓词变异抽查（翻转 http/https 闸门会使明文测试变红；
+39 个测试，仅标准库；人工谓词变异抽查（翻转 http/https 闸门会使明文测试变红；
 记录在 CHANGELOG）。
 
 ## 限制（诚实披露）

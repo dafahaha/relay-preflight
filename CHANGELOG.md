@@ -1,5 +1,24 @@
 # Changelog — relay-preflight
 
+v1.3.0 — 2026-10-23
+
+## Round-5 independent technical review (fresh reviewer, cold reading)
+- P1-1 (fixed): argparse usage errors (missing files, invalid type) exited 2,
+  colliding with the WARN exit code; a custom parser now exits 1 for usage
+  errors (--help still exits 0).
+- P1-2 (fixed): a bare `url` substring in the endpoint-field regex upgraded
+  harmless fields (`homepage_url`, `docs_url`) to FAIL; the regex now anchors
+  real endpoint names (base_url/api_url/server_url/endpoint).
+- P2-1 (fixed): sk-/pk- patterns now require a left boundary, so they no longer
+  match inside ordinary words (`desk-`, `risk-`).
+- P2-2 (fixed): Bearer detection now requires a longer token and filters common
+  prose words ("Bearer authentication/header/token"), avoiding false FAILs.
+- P2-3 (fixed): env references that count toward no-base-url/secret-context must
+  name a key (KEY/TOKEN/SECRET/...), so $PATH/$HOME no longer trip the WARN.
+- Output write moved inside the try (clean exit 1 on a bad path).
+- New tests: word boundary, bearer prose, non-key shell vars, homepage_url,
+  usage exit 1. Suite: 34 -> 39.
+
 v1.0.0 — 2026-10-22
 
 ## v1 (baseline)

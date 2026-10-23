@@ -251,3 +251,35 @@ def test_cross_file_env_ref_without_url_warns(tmp_path: Path):
     code = rp.main([str(a), str(b)])
     assert code == 2
     assert any(f.rule == "no-base-url" for f in rp.scan_file(a) + rp.scan_file(b))
+
+
+# ---- R5 review: false-positive guards (word boundary, prose, non-key vars) ----
+
+def test_sk_pattern_inside_word_not_flagged():
+    # `desk-`/`risk-` must not be read as an inline sk- key.
+    fs = rp.scan_text("sitting at my desk-abcdef to assess risk-123456", "note.txt")
+    assert not any(f.rule == "inline-secret" for f in fs)
+
+
+def test_bearer_prose_not_flagged():
+    fs = rp.scan_text("Bearer authentication is required for the Authorization header.", "doc.txt")
+    assert not any(f.rule == "bearer-literal" for f in fs)
+
+
+def test_non_key_shell_vars_no_false_warn(tmp_path: Path):
+    # $PATH/$HOME are not key references; no no-base-url WARN on their own.
+    a = _write(tmp_path, "a.sh", "export PATH=$HOME/bin:$PATH")
+    code = rp.main([str(a)])
+    assert code == 0
+
+
+def test_homepage_url_http_not_fail():
+    # A bare `homepage_url` over http is not a relay endpoint -> not FAIL.
+    fs = rp.scan_text('"homepage_url": "http://example.com/home"', "cfg.json")
+    assert not any(f.rule == "plaintext-url" and f.severity == "FAIL" for f in fs)
+
+
+def test_usage_error_exits_one():
+    with pytest.raises(SystemExit) as e:
+        rp.main([])
+    assert e.value.code == 1
