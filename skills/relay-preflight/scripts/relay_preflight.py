@@ -40,7 +40,11 @@ from urllib.parse import urlparse
 # lookbehind keeps `sk-`/`pk-` from matching inside ordinary words (desk-, risk-).
 SK_RE = re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{6,}")
 PK_RE = re.compile(r"(?<![A-Za-z0-9])pk-(?:live|test)-[A-Za-z0-9_\-]{6,}")
-JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+")
+# JWTs are base64url by spec, but some implementations emit standard base64
+# (with +, /) and trailing '=' padding; accept both.
+JWT_RE = re.compile(
+    r"eyJ[A-Za-z0-9_\-+/=]{8,}\.[A-Za-z0-9_\-+/=]+\.[A-Za-z0-9_\-+/=]+"
+)
 # A real Bearer credential is a long token; prose ("Bearer authentication",
 # "Bearer token/scheme/header") must not match. Common prose words are also
 # filtered explicitly (see _BEARER_PROSE_WORDS).
@@ -52,11 +56,13 @@ _BEARER_PROSE_WORDS = {
 }
 URL_RE = re.compile(r"https?://[^\s\"'\\,)]+")
 # Credentials embedded inline in a URL's userinfo: scheme://user:pass@host.
-URL_USERINFO_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s@]+:[^/\s@]+@")
+# The password segment may be empty ("user:@host"); the username is required.
+URL_USERINFO_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s@]+:[^/\s@]*@")
 # Env-var references: ${VAR} (paired braces, optionally with a shell
-# default-value expansion such as ${VAR:-default}) or $VAR (word boundary).
+# default-value expansion such as ${VAR:-default} or the POSIX ${VAR=default})
+# or $VAR (word boundary).
 ENV_REF_RE = re.compile(
-    r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::[-=?+][^}]*)?\}"
+    r"\$\{[A-Za-z_][A-Za-z0-9_]*(?:(?::[-=?+]|=)[^}]*)?\}"
     r"|\$[A-Za-z_][A-Za-z0-9_]*\b"
 )
 # Exact key words (matched per variable-name word, not as a substring), so
@@ -110,9 +116,13 @@ def _key_env_ref(text: str) -> bool:
     for m in ENV_REF_RE.finditer(text):
         # Strip the leading $ and any braces to inspect the variable name.
         name = m.group(0).lstrip("$").strip("{}")
-        # Drop a shell default-value expansion (${VAR:-default} / ${VAR:=x})
-        # so the default text does not pollute the name's word split.
-        name = re.split(r":[-=?+]", name, maxsplit=1)[0]
+        # Drop a shell default-value expansion (${VAR:-default} / ${VAR:=x} /
+        # POSIX ${VAR=default}) so the default text does not pollute the name.
+        colon = re.search(r":[-=?+]", name)
+        if colon:
+            name = name[:colon.start()]
+        elif "=" in name:
+            name = name[:name.index("=")]
         if _is_key_name(name):
             return True
     return False
@@ -176,9 +186,11 @@ def redact_url(url: str) -> str:
     """Reduce to scheme://host:port; drop userinfo, path, query, fragment."""
     try:
         parts = urlparse(url)
+        # Accessing .hostname can raise on a malformed IPv6 bracket even when
+        # urlparse returns; guard it so one bad URL cannot abort the whole scan.
+        host = (parts.hostname or "").strip("[]").lower()
     except ValueError:
         return "(unparseable URL, hidden)"
-    host = (parts.hostname or "").strip("[]").lower()
     netloc = host
     # A malformed port (e.g. :abc, :99999) must not abort the whole scan; keep
     # just the host when the port is unusable.
@@ -230,9 +242,11 @@ def _is_bind_all_url(url: str) -> bool:
 
 
 def _is_bearer_prose(token: str) -> bool:
-    """True when a Bearer 'token' is really prose (e.g. 'example.com',
-    'authentication'): split on punctuation and match any segment."""
-    return any(seg in _BEARER_PROSE_WORDS for seg in re.split(r"[._\-]+", token.lower()))
+    """True when a Bearer 'token' is really prose. Only a single prose word
+    ("authentication", "token", "header") is filtered; a composite value such
+    as "abc.token.def" merely containing a prose segment is treated as a real
+    credential (fail-closed) rather than silently skipped."""
+    return token.lower() in _BEARER_PROSE_WORDS
 
 
 def _secret_findings(value: str, file_label: str, line: int, where: str) -> list[Finding]:

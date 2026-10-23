@@ -385,3 +385,40 @@ def test_ipv6_loopback_and_unspecified():
 def test_mask_token_keeps_real_prefix():
     # P2-4: a pk- token must not be masked with an sk- prefix.
     assert rp.mask_token("pk-live-abcdefgh").startswith("pk-")
+
+
+def test_jwt_standard_base64_chars():
+    # R9 P2-1: a JWT using standard base64 (+, /, =) is still detected.
+    fs = rp.scan_text(
+        "eyJabc+/=ab.eyJseg+/=ab.eyJsig+/=ab", "cfg")
+    assert any(f.rule == "inline-secret" and f.severity == "FAIL" for f in fs)
+
+
+def test_composite_bearer_token_not_prose():
+    # R9 P2-2: a composite token containing a prose segment is a real credential.
+    fs = rp.scan_text("Authorization: Bearer abc.token.def", "cfg")
+    assert any(f.rule == "bearer-literal" and f.severity == "FAIL" for f in fs)
+    # A single prose word is still filtered.
+    assert rp._is_bearer_prose("authentication") is True
+
+
+def test_redact_url_malformed_ipv6_hidden():
+    # R9 P2-3: a malformed IPv6 bracket does not abort the scan.
+    assert "hidden" in rp.redact_url("http://[::1/path")
+
+
+def test_posix_bare_default_env_ref():
+    # R9 P2-4: ${API_KEY=default} is recognized as a key reference.
+    assert rp._key_env_ref("${API_KEY=default}") is True
+
+
+def test_empty_password_userinfo_detected():
+    # R9 P2-5: "user:@host" (empty password) is userinfo.
+    fs = rp.scan_text("http://user:@host.example.com/v1", "cfg")
+    assert any(f.rule == "url-userinfo-credential" and f.severity == "FAIL" for f in fs)
+
+
+def test_underscore_prefix_sk_not_word_boundary():
+    # R9 P2-6: "_sk-abcdef1234" is still an inline secret.
+    fs = rp.scan_text("_sk-abcdef123456", "cfg")
+    assert any(f.rule == "inline-secret" and f.severity == "FAIL" for f in fs)

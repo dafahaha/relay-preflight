@@ -1,5 +1,25 @@
 # Changelog — relay-preflight
 
+v1.7.0 — 2026-10-23
+
+## Round-9 independent clean review (fresh reviewer, cold reading)
+- P2-1 (fixed): JWT detection accepts standard base64 characters (+, /, =)
+  as well as base64url.
+- P2-2 (fixed): a composite Bearer value ("abc.token.def") merely containing
+  a prose segment is treated as a real credential; only a single prose word
+  is filtered.
+- P2-3 (fixed): redact_url guards the hostname access (a malformed IPv6
+  bracket cannot abort the whole scan).
+- P2-4 (fixed): POSIX `${VAR=default}` (bare `=`) is recognized as a key
+  reference.
+- P2-5 (fixed): URL userinfo with an empty password ("user:@host") is
+  detected.
+- P2-6 (reviewer misread, not changed): the original word boundary already
+  matches an underscore-prefixed `_sk-...` (underscore is not in the
+  alphanumeric lookbehind); adding underscore to the lookbehind was a
+  regression and was reverted.
+- Suite: 61 tests (6 added).
+
 v1.6.0 — 2026-10-23
 
 ## Round-8 independent clean review (fresh reviewer, cold reading)
